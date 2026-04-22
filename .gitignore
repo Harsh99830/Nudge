@@ -26,3 +26,4 @@ dist-ssr
 
 # JupyterLite temporary build folder (NOT the final public/ output)
 _jlite_build/
+.claude/worktrees/
