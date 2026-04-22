@@ -1,57 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useUser } from '@clerk/clerk-react';
-import { ref, get } from 'firebase/database';
-import { db } from '../firebase';
-import { getProjectConfig, getAIContext } from '../PythonProject/projectConfig';
 
 function AI({ userCode, messages, setMessages, terminalOutput = [] }) {
-  const { user } = useUser();
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [projectConfig, setProjectConfig] = useState(null);
-  const [loadError, setLoadError] = useState('');
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const prevMessagesLength = useRef(messages.length);
   const isFirstRender = useRef(true);
 
-  // Fetch project data when component mounts
-  useEffect(() => {
-    const fetchProjectData = async () => {
-      if (!user) return;
-      setLoadError('');
-      try {
-        // Get user's current Pandas project
-        const userRef = ref(db, 'users/' + user.id + '/pandas');
-        const userSnap = await get(userRef);
-        if (userSnap.exists()) {
-          const userData = userSnap.val();
-          const projectKey = userData.PandasCurrentProject;
-          if (projectKey) {
-            // Get project data
-            const projectRef = ref(db, 'PandasProject/' + projectKey);
-            const projectSnap = await get(projectRef);
-            if (projectSnap.exists()) {
-              setProjectConfig(projectSnap.val());
-            } else {
-              setProjectConfig(null);
-              setLoadError('Project not found in PandasProject: ' + projectKey);
-            }
-          } else {
-            setProjectConfig(null);
-            setLoadError('No PandasCurrentProject set for user.');
-          }
-        } else {
-          setProjectConfig(null);
-          setLoadError('User data not found.');
-        }
-      } catch (error) {
-        setProjectConfig(null);
-        setLoadError('Error fetching project data: ' + error.message);
-      }
-    };
-    fetchProjectData();
-  }, [user]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -66,17 +22,17 @@ function AI({ userCode, messages, setMessages, terminalOutput = [] }) {
 
   // Initialize with welcome message only if no messages exist
   useEffect(() => {
-    if (projectConfig && messages.length === 0) {
+    if (messages.length === 0) {
       setMessages([
         {
           id: 1,
           type: 'ai',
-          content: `Hi! I'm here to help you with your ${projectConfig.title} project.  What would you like help with?`,
+          content: "Hi! I'm here to help you with your Pandas project. What would you like help with?",
           timestamp: new Date()
         }
       ]);
     }
-  }, [projectConfig, messages.length, setMessages]);
+  }, [messages.length, setMessages]);
 
   const sendMessage = async () => {
     if (!inputMessage.trim() || isLoading) return;
@@ -90,21 +46,28 @@ function AI({ userCode, messages, setMessages, terminalOutput = [] }) {
     setInputMessage('');
     setIsLoading(true);
     try {
-      // For Pandas, just use the projectConfig and userCode for context
-      const context = projectConfig || {};
       const history = messages.slice(-6).map(
         m => `${m.type === 'user' ? 'User' : 'AI'}: ${m.content}`
       ).join('\n');
-      let allTasksText = '';
-      if (projectConfig && projectConfig.tasks) {
-        allTasksText = Object.entries(projectConfig.tasks).map(
-          ([taskKey, task], idx) => {
-            const subtasks = (task.subtasks || []).map((s, i) => `    ${i + 1}. ${s}`).join('\n');
-            return `${idx + 1}. ${task.title}${subtasks ? '\n' + subtasks : ''}`;
-          }
-        ).join('\n');
-      }
-      const prompt = `You are a helpful Pandas programming tutor. The user is working on a project called "${context.title || ''}".\n\nProject Description: ${context.description || ''}\n\nALL TASKS AND SUBTASKS:\n${allTasksText}\n\nUser's Current Code:\n\u0060\u0060\u0060python\n${userCode || 'No code written yet'}\n\u0060\u0060\u0060\n\nConversation so far:\n${history}\n\nUser's latest question: ${inputMessage}\n\nIMPORTANT INSTRUCTIONS:\n- Respond ONLY to the user's latest question, and help them with their current task/subtask.\n- Do not provide extra information or answer unasked questions.\n- Give small, chat-like responses (2-3 sentences max)\n- Focus on actionable, specific feedback for the user's code and question\n- Avoid generic encouragements like "Great start" or "Good job" unless the user has completed all tasks\n- DO NOT provide complete code solutions\n- Give hints for the current task/subtask only\n- ONLY give hints about the tasks and subtasks defined in the project\n- If all tasks are complete, congratulate the user and offer to review or answer questions.\n- Only answer what the user has asked. Do NOT suggest next steps, future tasks, or what to do next unless the user specifically asks.`;
+      const prompt = `You are a helpful Pandas programming tutor.
+
+User's Current Code:
+\u0060\u0060\u0060python
+${userCode || 'No code written yet'}
+\u0060\u0060\u0060
+
+Conversation so far:
+${history}
+
+User's latest question: ${inputMessage}
+
+IMPORTANT INSTRUCTIONS:
+- Respond ONLY to the user's latest question
+- Give small, chat-like responses (2-3 sentences max)
+- Focus on actionable, specific feedback for the user's code and question
+- DO NOT provide complete code solutions
+- Give hints and guidance only
+- Only answer what the user has asked. Do NOT suggest next steps unless the user specifically asks.`;
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 20000);
 
@@ -171,11 +134,7 @@ function AI({ userCode, messages, setMessages, terminalOutput = [] }) {
       <div className="p-4 border-b border-gray-700">
         <h2 className="text-xl font-semibold text-purple-400">AI Mentor</h2>
         <p className="text-sm text-gray-400 mt-1">
-          {loadError
-            ? <span className="text-red-400">{loadError}</span>
-            : projectConfig
-              ? `Helping with: ${projectConfig.title}`
-              : 'Loading project...'}
+          Ask me anything about your Pandas code
         </p>
       </div>
       {/* Messages Area */}
