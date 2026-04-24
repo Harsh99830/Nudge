@@ -62,7 +62,7 @@ const MODES = {
     placeholder: 'Ask me anything…',
     cta: 'Ask',
     systemRole:
-      "Answer the student's question helpfully and concisely. Connect the answer to their project context when possible. Do NOT write code they should write themselves.",
+      "Give hints only. Do NOT give the full solution or write code. Ask guiding questions to help the student think. Keep responses short (max 2 sentences).",
   },
 };
 
@@ -125,6 +125,8 @@ function AI({ userCode, messages, setMessages, terminalOutput = [], bulbHint, on
   const [elapsedMin,  setElapsedMin]  = useState(0);
   const [bulbHintText,  setBulbHintText]  = useState('');   // AI-generated bulb hint
   const [bulbLoading,   setBulbLoading]   = useState(false); // loading state for bulb hint
+  const [hintLevel,     setHintLevel]     = useState(1);     // hint level: 1=subtle, 2=more specific, 3=very specific
+  const [storedBulbHint, setStoredBulbHint] = useState(null); // store bulb hint data for re-fetching on level change
 
   const inputRef    = useRef(null);
   const startTime   = useRef(Date.now());
@@ -148,6 +150,11 @@ function AI({ userCode, messages, setMessages, terminalOutput = [], bulbHint, on
   // Reset input on mode switch
   useEffect(() => { setInputText(''); }, [activeMode]);
 
+  // Log messages changes for debugging
+  useEffect(() => {
+    console.log('[AI] Messages updated:', messages);
+  }, [messages]);
+
   // ── Bulb hint: fire OpenAI when a cell hint is requested ────────────
   useEffect(() => {
     if (!bulbHint) return;
@@ -155,6 +162,8 @@ function AI({ userCode, messages, setMessages, terminalOutput = [], bulbHint, on
 
     setBulbHintText('');
     setBulbLoading(true);
+    setHintLevel(1); // reset to level 1 for new cell
+    setStoredBulbHint(bulbHint); // store for re-fetching on level change
     setActiveMode('hint'); // switch to hint tab so the box is visible
 
     const { cellCode, cellOutput } = bulbHint;
@@ -172,11 +181,16 @@ ${cellCode || '(empty cell)'}
 \`\`\`
 ${cellOutput ? `\nCell output / error:\n${cellOutput}` : ''}
 
+Current hint level: ${hintLevel}
+- Level 1: Very subtle hint (max 1 sentence, just a gentle nudge)
+- Level 2: More specific hint (1-2 sentences, point to the general area of the problem)
+- Level 3: Very specific hint (2 sentences, almost giving the answer but not the exact code)
+
 Your job:
 
 1. If the code is correct, respond: "This looks good. What do you think your next step should be?"
 
-2. If there's a mistake, give ONE short guiding question (max 1 sentence) to nudge them in the right direction. Do NOT state the error directly.
+2. If there's a mistake, give a hint based on the current hint level. Do NOT state the error directly.
 
 3. Never give the solution, corrected code, or exact fix.
 
@@ -207,11 +221,79 @@ Your job:
       .finally(() => setBulbLoading(false));
   }, [bulbHint]);
 
+  // ── Re-fetch hint when hint level changes ──────────────────────────
+  useEffect(() => {
+    if (!storedBulbHint || hintLevel === 1) return; // only re-fetch for levels 2 and 3
+
+    setBulbLoading(true);
+    const { cellCode, cellOutput } = storedBulbHint;
+
+    const prompt = `You are a friendly data-science tutor helping a student who is stuck.
+
+Full notebook code (all cells):
+\`\`\`python
+${userCode || '# (no code synced yet)'}
+\`\`\`
+
+The student clicked the hint bulb on THIS specific cell:
+\`\`\`python
+${cellCode || '(empty cell)'}
+\`\`\`
+${cellOutput ? `\nCell output / error:\n${cellOutput}` : ''}
+
+Current hint level: ${hintLevel}
+- Level 1: Very subtle hint (max 1 sentence, just a gentle nudge)
+- Level 2: More specific hint (1-2 sentences, point to the general area of the problem)
+- Level 3: Very specific hint (2 sentences, almost giving the answer but not the exact code)
+
+Your job:
+
+1. If the code is correct, respond: "This looks good. What do you think your next step should be?"
+
+2. If there's a mistake, give a hint based on the current hint level. Do NOT state the error directly.
+
+3. Never give the solution, corrected code, or exact fix.
+
+4. Do NOT use phrases like: "the error is...", "the issue is...", "you should do..."
+
+5. Keep it simple and beginner-friendly.`;
+
+
+    fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.65,
+        max_tokens: 180,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        const text = data.choices?.[0]?.message?.content || 'Could not generate a hint. Please try again.';
+        setBulbHintText(text);
+      })
+      .catch(() => setBulbHintText('Something went wrong. Please try again.'))
+      .finally(() => setBulbLoading(false));
+  }, [hintLevel, storedBulbHint, userCode]);
+
+  const handleNextHint = () => {
+    if (hintLevel < 3) {
+      setHintLevel(prev => prev + 1);
+      setBulbLoading(true);
+    }
+  };
+
   const mode = MODES[activeMode];
 
   const handleSubmit = async () => {
     if (!inputText.trim() || isLoading) return;
 
+    console.log('[AI] Submitting message, activeMode:', activeMode);
     const userMsg = { id: Date.now(), mode: activeMode, type: 'user', content: inputText.trim(), ts: new Date() };
     setMessages(prev => [...prev, userMsg]);
     const captured = inputText.trim();
@@ -237,6 +319,7 @@ ${recentLog || '(none)'}
 
 Student says: ${captured}`;
 
+      console.log('[AI] Sending prompt to OpenAI...');
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -252,11 +335,15 @@ Student says: ${captured}`;
       });
 
       const data = await res.json();
+      console.log('[AI] OpenAI response:', data);
       if (!res.ok) throw new Error(data?.error?.message || 'API error');
 
       const reply = data.choices?.[0]?.message?.content || 'Something went wrong. Try again!';
+      console.log('[AI] Reply:', reply);
       setMessages(prev => [...prev, { id: Date.now() + 1, mode: activeMode, type: 'ai', content: reply, ts: new Date() }]);
+      console.log('[AI] Message added, current messages count:', messages.length + 1);
     } catch (err) {
+      console.error('[AI] Error:', err);
       setMessages(prev => [...prev, {
         id: Date.now() + 1, mode: activeMode, type: 'ai',
         content: 'Something went wrong. Please try again.', ts: new Date(),
@@ -353,9 +440,30 @@ Student says: ${captured}`;
                 </div>
               ) : bulbHintText ? (
                 <div>
-                  <div className="flex items-center gap-2 mb-2">
-                    <span style={{ fontSize: 16 }}>💡</span>
-                    <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.07em', color: '#14b8a6' }}>NUDGE AI · CELL HINT</span>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span style={{ fontSize: 16 }}>💡</span>
+                      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.07em', color: '#14b8a6' }}>NUDGE AI · CELL HINT</span>
+                      <span style={{ fontSize: 9, color: 'rgba(203,213,225,.4)' }}>Level {hintLevel}/3</span>
+                    </div>
+                    {hintLevel < 3 && (
+                      <button
+                        onClick={handleNextHint}
+                        disabled={bulbLoading}
+                        style={{
+                          fontSize: 14,
+                          color: '#14b8a6',
+                          background: 'none',
+                          border: 'none',
+                          cursor: bulbLoading ? 'not-allowed' : 'pointer',
+                          padding: 0,
+                          opacity: bulbLoading ? 0.5 : 1,
+                        }}
+                        title="Get a more specific hint"
+                      >
+                        {bulbLoading ? '...' : '>'}
+                      </button>
+                    )}
                   </div>
                   <p className="text-xs leading-relaxed text-left" style={{ color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>
                     {bulbHintText}
@@ -381,12 +489,12 @@ Student says: ${captured}`;
               {/* Chat messages */}
               <div className="flex-1 overflow-y-auto p-3 space-y-3"
                 style={{ minHeight: '200px', maxHeight: 'calc(100vh - 400px)' }}>
-                {isLoading && messages.filter(m => m.mode === 'ask').length === 0 ? (
+                {isLoading && messages.length === 0 ? (
                   <div className="flex items-center gap-2">
                     <TypingDots />
                     <span style={{ fontSize: 11, color: 'rgba(203,213,225,.4)' }}>Nudge AI is thinking…</span>
                   </div>
-                ) : messages.filter(m => m.mode === 'ask').length === 0 ? (
+                ) : messages.length === 0 ? (
                   <div className="flex items-center justify-center h-full" style={{ minHeight: 120 }}>
                     <span style={{ fontSize: 12, color: 'rgba(203,213,225,.3)', textAlign: 'center' }}>
                       Ask me anything about your project.
@@ -394,44 +502,48 @@ Student says: ${captured}`;
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {[...messages].reverse().filter(m => m.mode === 'ask').map(m => (
-                      <div key={m.id} className="flex w-full">
-                        {m.type === 'user' ? (
-                          <div className="ml-auto max-w-[80%]">
-                            <div
-                              className="rounded-lg px-3 py-2 text-xs"
-                              style={{
-                                background: '#005c4b',
-                                color: '#e9edef',
-                                borderRadius: '8px 8px 0 8px',
-                              }}
-                            >
-                              {m.content}
+                    {(() => {
+                      const chatMessages = messages;
+                      console.log('[AI] Rendering chat messages:', chatMessages);
+                      return chatMessages.map(m => (
+                        <div key={m.id} className="flex w-full">
+                          {m.type === 'user' ? (
+                            <div className="ml-auto max-w-[80%]">
+                              <div
+                                className="rounded-lg px-3 py-2 text-xs"
+                                style={{
+                                  background: '#005c4b',
+                                  color: '#e9edef',
+                                  borderRadius: '8px 8px 0 8px',
+                                }}
+                              >
+                                {m.content}
+                              </div>
+                              <span className="text-[9px]" style={{ color: 'rgba(203,213,225,.3)' }}>
+                                {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
                             </div>
-                            <span className="text-[9px]" style={{ color: 'rgba(203,213,225,.3)' }}>
-                              {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </span>
-                          </div>
-                        ) : (
-                          <div className="mr-auto max-w-[80%]">
-                            <div
-                              className="rounded-lg px-3 py-2 text-xs"
-                              style={{
-                                background: '#202c33',
-                                color: '#e9edef',
-                                borderRadius: '8px 8px 8px 0',
-                              }}
-                            >
-                              {m.content}
+                          ) : (
+                            <div className="mr-auto max-w-[80%]">
+                              <div
+                                className="rounded-lg px-3 py-2 text-xs"
+                                style={{
+                                  background: '#202c33',
+                                  color: '#e9edef',
+                                  borderRadius: '8px 8px 8px 0',
+                                }}
+                              >
+                                {m.content}
+                              </div>
+                              <span className="text-[9px]" style={{ color: 'rgba(203,213,225,.3)' }}>
+                                {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
                             </div>
-                            <span className="text-[9px]" style={{ color: 'rgba(203,213,225,.3)' }}>
-                              {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                    {isLoading && messages.filter(m => m.mode === 'ask').length > 0 && (
+                          )}
+                        </div>
+                      ));
+                    })()}
+                    {isLoading && messages.length > 0 && (
                       <div className="flex w-full">
                         <div className="mr-auto max-w-[80%]">
                           <div
@@ -451,66 +563,69 @@ Student says: ${captured}`;
                 )}
               </div>
 
-              {/* Quick question button */}
-              <button
-                onClick={() => {
-                  setInputText("What's the next step?");
-                  handleSubmit();
-                }}
-                style={{
-                  width: '100%',
-                  padding: '8px 12px',
-                  marginBottom: '8px',
-                  fontSize: '11px',
-                  color: '#14b8a6',
-                  background: 'rgba(20,184,166,.08)',
-                  border: '1px solid rgba(20,184,166,.2)',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                  transition: 'all 0.15s ease',
-                }}
-                onMouseEnter={e => {
-                  e.target.style.background = 'rgba(20,184,166,.12)';
-                  e.target.style.borderColor = 'rgba(20,184,166,.3)';
-                }}
-                onMouseLeave={e => {
-                  e.target.style.background = 'rgba(20,184,166,.08)';
-                  e.target.style.borderColor = 'rgba(20,184,166,.2)';
-                }}
-              >
-                What's the next step?
-              </button>
+              {/* Input area with quick question button */}
+              <div className="mt-auto">
+                {/* Quick question button */}
+                <button
+                  onClick={() => {
+                    setInputText("What's the next step?");
+                    handleSubmit();
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    marginBottom: '8px',
+                    fontSize: '11px',
+                    color: '#14b8a6',
+                    background: 'rgba(20,184,166,.08)',
+                    border: '1px solid rgba(20,184,166,.2)',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  onMouseEnter={e => {
+                    e.target.style.background = 'rgba(20,184,166,.12)';
+                    e.target.style.borderColor = 'rgba(20,184,166,.3)';
+                  }}
+                  onMouseLeave={e => {
+                    e.target.style.background = 'rgba(20,184,166,.08)';
+                    e.target.style.borderColor = 'rgba(20,184,166,.2)';
+                  }}
+                >
+                  What's the next step?
+                </button>
 
-              {/* Input box */}
-              <textarea
-                ref={inputRef}
-                value={inputText}
-                onChange={e => setInputText(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask me anything…"
-                disabled={isLoading}
-                rows={2}
-                className="ai-input-area rounded-lg p-3"
-                style={{ background: 'rgba(0,0,0,.35)', border: '1px solid rgba(255,255,255,.08)', minHeight: '60px' }}
-              />
+                {/* Input box */}
+                <textarea
+                  ref={inputRef}
+                  value={inputText}
+                  onChange={e => setInputText(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Ask me anything…"
+                  disabled={isLoading}
+                  rows={2}
+                  className="ai-input-area rounded-lg p-3"
+                  style={{ background: 'rgba(0,0,0,.35)', border: '1px solid rgba(255,255,255,.08)', minHeight: '60px' }}
+                />
 
-              {/* Submit button */}
-              <button
-                onClick={handleSubmit}
-                disabled={!inputText.trim() || isLoading}
-                className="w-full py-2 rounded-lg text-sm font-semibold transition-all duration-200 mt-2"
-                style={{
-                  background: inputText.trim() && !isLoading
-                    ? 'linear-gradient(135deg, #0d9488, #0891b2)'
-                    : 'rgba(255,255,255,.05)',
-                  color: inputText.trim() && !isLoading ? '#fff' : 'rgba(203,213,225,.25)',
-                  border: 'none',
-                  cursor: inputText.trim() && !isLoading ? 'pointer' : 'not-allowed',
-                  boxShadow: inputText.trim() && !isLoading ? '0 0 16px rgba(13,148,136,.3)' : 'none',
-                }}
-              >
-                {isLoading ? 'Thinking…' : 'Ask'}
-              </button>
+                {/* Submit button */}
+                <button
+                  onClick={handleSubmit}
+                  disabled={!inputText.trim() || isLoading}
+                  className="w-full py-2 rounded-lg text-sm font-semibold transition-all duration-200 mt-2"
+                  style={{
+                    background: inputText.trim() && !isLoading
+                      ? 'linear-gradient(135deg, #0d9488, #0891b2)'
+                      : 'rgba(255,255,255,.05)',
+                    color: inputText.trim() && !isLoading ? '#fff' : 'rgba(203,213,225,.25)',
+                    border: 'none',
+                    cursor: inputText.trim() && !isLoading ? 'pointer' : 'not-allowed',
+                    boxShadow: inputText.trim() && !isLoading ? '0 0 16px rgba(13,148,136,.3)' : 'none',
+                  }}
+                >
+                  {isLoading ? 'Thinking…' : 'Ask'}
+                </button>
+              </div>
             </div>
           )}
         </div>
