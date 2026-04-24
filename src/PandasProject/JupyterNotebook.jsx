@@ -6,24 +6,15 @@ import { db } from '../firebase';
 const JUPYTERLITE_LAB = '/jupyterlite/lab/index.html';
 
 // ── Decode whatever JupyterLite stored in IndexedDB ──────────────────
-// JupyterLite's BrowserStorageDrive stores file content as a Uint8Array
-// encoded as a plain object with numeric string keys: { '0': 123, '1': 34, ... }
-// We must convert that back to a Uint8Array → UTF-8 string → JSON.
 function decodeRawValue(raw) {
   if (!raw) return null;
-
-  // Already a notebook
   if (raw.cells) return raw;
-
-  // Wrapped: { content: notebook }
   if (raw.content) {
     if (raw.content.cells) return raw.content;
     if (typeof raw.content === 'string') {
       try { const p = JSON.parse(raw.content); if (p?.cells) return p; } catch (_) {}
     }
   }
-
-  // Uint8Array stored as plain object with numeric keys { '0': n, '1': n, ... }
   const keys = Object.keys(raw);
   const isUint8 = keys.length > 0 && keys.every(k => !isNaN(k)) && typeof raw[0] === 'number';
   if (isUint8) {
@@ -39,28 +30,22 @@ function decodeRawValue(raw) {
       console.warn('[STED] Uint8Array decode failed:', e.message);
     }
   }
-
-  // Raw string
   if (typeof raw === 'string') {
     try { const q = JSON.parse(raw); if (q?.cells) return q; } catch (_) {}
   }
-
   return raw;
 }
 
 function codeFromNotebook(nb) {
   const notebook = decodeRawValue(nb);
   if (!notebook) return '';
-
   let cells = notebook.cells;
   if (!cells && notebook.content) cells = notebook.content.cells;
   if (!Array.isArray(cells)) return '';
-
   return cells
     .filter(c => c.cell_type === 'code')
     .map(c => {
       const source = Array.isArray(c.source) ? c.source.join('') : c.source || '';
-
       let outputText = '';
       if (Array.isArray(c.outputs) && c.outputs.length > 0) {
         const outputs = c.outputs.map(out => {
@@ -74,109 +59,163 @@ function codeFromNotebook(nb) {
         }).filter(s => s.trim()).join('\n');
         if (outputs) outputText = '\n# --- Output ---\n' + outputs;
       }
-
       return source + outputText;
     })
     .filter(s => s.trim())
     .join('\n\n');
 }
 
-// ── Bridge injected into iframe via eval() ───────────────────────────
+// ── Bridge: only sends cell click info to parent via postMessage ──────
+// The bulb itself is rendered by React in the parent page — no DOM injection needed.
+// Version stamp busts the guard on each change.
 const BRIDGE_SCRIPT = `
 (function() {
-  if (window.__STED_BRIDGE_INSTALLED__) return;
-  window.__STED_BRIDGE_INSTALLED__ = true;
+  var VER = 'v5';
+  if (window.__STED_BRIDGE_VER__ === VER) return;
+  window.__STED_BRIDGE_VER__ = VER;
 
-  async function readNotebookFromIDB(filename) {
-    return new Promise((resolve, reject) => {
-      const baseUrl = (window.location.pathname.replace(/\\/lab.*/, '') || '/').replace(/\\/$/, '') + '/';
-      const dbName  = 'JupyterLite Storage - ' + baseUrl;
-      const req = indexedDB.open(dbName);
-      req.onerror = () => reject(new Error('Cannot open IndexedDB: ' + dbName));
-      req.onsuccess = (e) => {
-        const db = e.target.result;
-        const storeNames = Array.from(db.objectStoreNames);
-        const filesStore = storeNames.find(s => s === 'files') || storeNames[0];
-        if (!filesStore) { reject(new Error('No object store found in ' + dbName)); return; }
-        const tx = db.transaction(filesStore, 'readonly');
-        const store = tx.objectStore(filesStore);
-        const getReq = store.get(filename);
-        getReq.onsuccess = (e) => {
-          if (e.target.result !== undefined) {
-            resolve({ name: filename, content: e.target.result });
-          } else {
-            const allReq = store.getAllKeys();
-            allReq.onsuccess = (ke) => {
-              const keys = ke.target.result;
-              const ipynbKeys = keys.filter(k => String(k).endsWith('.ipynb'));
-              if (ipynbKeys.length === 0) {
-                reject(new Error('No .ipynb files found in store. Keys: ' + keys.slice(0,10).join(', ')));
-                return;
-              }
-              const firstKey = ipynbKeys[0];
-              const getFirst = store.get(firstKey);
-              getFirst.onsuccess = (fe) => resolve({ name: firstKey, content: fe.target.result });
-              getFirst.onerror = () => reject(new Error('Cannot read file: ' + firstKey));
-            };
-            allReq.onerror = () => reject(new Error('Cannot list keys in store'));
-          }
-        };
-        getReq.onerror = () => reject(new Error('Cannot get file: ' + filename));
-      };
+  /* ── IDB helpers ── */
+  function openDB() {
+    return new Promise(function(resolve, reject) {
+      var baseUrl = (window.location.pathname.replace(/\\/lab.*/, '') || '/').replace(/\\/$/, '') + '/';
+      var dbName = 'JupyterLite Storage - ' + baseUrl;
+      var req = indexedDB.open(dbName);
+      req.onerror = function() { reject(new Error('Cannot open IDB: ' + dbName)); };
+      req.onsuccess = function(e) { resolve(e.target.result); };
     });
+  }
+
+  function getStore(db) {
+    var names = Array.from(db.objectStoreNames);
+    return names.find(function(s) { return s === 'files'; }) || names[0];
   }
 
   async function listNotebooks() {
-    return new Promise((resolve) => {
-      const baseUrl = (window.location.pathname.replace(/\\/lab.*/, '') || '/').replace(/\\/$/, '') + '/';
-      const dbName  = 'JupyterLite Storage - ' + baseUrl;
-      const req = indexedDB.open(dbName);
-      req.onerror = () => resolve([]);
-      req.onsuccess = (e) => {
-        const db = e.target.result;
-        const storeNames = Array.from(db.objectStoreNames);
-        const filesStore = storeNames.find(s => s === 'files') || storeNames[0];
-        if (!filesStore) { resolve([]); return; }
-        const tx = db.transaction(filesStore, 'readonly');
-        const store = tx.objectStore(filesStore);
-        const allReq = store.getAllKeys();
-        allReq.onsuccess = (ke) => {
-          const keys = ke.target.result.filter(k => String(k).endsWith('.ipynb'));
-          resolve(keys);
+    try {
+      var db = await openDB();
+      var storeName = getStore(db);
+      if (!storeName) return [];
+      return new Promise(function(resolve) {
+        var tx = db.transaction(storeName, 'readonly');
+        var req = tx.objectStore(storeName).getAllKeys();
+        req.onsuccess = function(e) {
+          resolve(e.target.result.filter(function(k) { return String(k).endsWith('.ipynb'); }));
         };
-        allReq.onerror = () => resolve([]);
+        req.onerror = function() { resolve([]); };
+      });
+    } catch(e) { return []; }
+  }
+
+  async function readNotebook(filename) {
+    var db = await openDB();
+    var storeName = getStore(db);
+    if (!storeName) throw new Error('No object store');
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction(storeName, 'readonly');
+      var store = tx.objectStore(storeName);
+      var req = store.get(filename);
+      req.onsuccess = function(e) {
+        if (e.target.result !== undefined) {
+          resolve({ name: filename, content: e.target.result });
+        } else {
+          var allReq = store.getAllKeys();
+          allReq.onsuccess = function(ke) {
+            var keys = ke.target.result.filter(function(k) { return String(k).endsWith('.ipynb'); });
+            if (!keys.length) { reject(new Error('No .ipynb found')); return; }
+            var gr = store.get(keys[0]);
+            gr.onsuccess = function(fe) { resolve({ name: keys[0], content: fe.target.result }); };
+            gr.onerror = function() { reject(new Error('Cannot read ' + keys[0])); };
+          };
+          allReq.onerror = function() { reject(new Error('getAllKeys failed')); };
+        }
       };
+      req.onerror = function() { reject(new Error('Cannot get ' + filename)); };
     });
   }
 
-  window.addEventListener('message', async (event) => {
+  /* ── STED_GET_NOTEBOOK handler ── */
+  window.addEventListener('message', async function(event) {
     if (!event.data || event.data.type !== 'STED_GET_NOTEBOOK') return;
-    const filename = event.data.filename || 'notebook.ipynb';
+    var filename = event.data.filename || 'notebook.ipynb';
     try {
-      const allNbs = await listNotebooks();
-      const target = allNbs.includes(filename) ? filename
-                   : allNbs.length > 0 ? allNbs[0]
-                   : filename;
-      const { name, content } = await readNotebookFromIDB(target);
+      var allNbs = await listNotebooks();
+      var target = allNbs.includes(filename) ? filename : (allNbs[0] || filename);
+      var result = await readNotebook(target);
       event.source.postMessage({
-        type:     'STED_NOTEBOOK_DATA',
-        notebook: content,
-        filename: name,
+        type: 'STED_NOTEBOOK_DATA',
+        notebook: result.content,
+        filename: result.name,
         allFiles: allNbs,
       }, event.origin);
-    } catch (err) {
-      event.source.postMessage({
-        type:  'STED_NOTEBOOK_ERROR',
-        error: err.message,
-      }, event.origin);
+    } catch(err) {
+      event.source.postMessage({ type: 'STED_NOTEBOOK_ERROR', error: err.message }, event.origin);
     }
   });
 
-  console.log('[STED Bridge] installed');
+  /* ── Cell click tracker ─────────────────────────────────────────────
+     Sends cell position + content to parent. Parent renders the bulb.  */
+  function getCellData(cell) {
+    var sourceEl = cell.querySelector('.jp-InputArea-editor, .jp-Editor, .CodeMirror');
+    var cellCode = sourceEl ? sourceEl.textContent.trim() : '';
+    var outputParts = [];
+    cell.querySelectorAll('.jp-OutputArea-output').forEach(function(out) {
+      var txt = out.textContent.trim();
+      if (txt) outputParts.push(txt);
+    });
+    return { cellCode: cellCode, cellOutput: outputParts.join('\\n') };
+  }
+
+  function hasContent(cell) {
+    var el = cell.querySelector('.jp-InputArea-editor, .jp-MarkdownOutput, .jp-Editor, .CodeMirror');
+    return el && el.textContent.trim().length > 0;
+  }
+
+  function attach(cell) {
+    if (cell.dataset.stedTrack) return;
+    cell.dataset.stedTrack = 'true';
+    cell.addEventListener('mousedown', function() {
+      if (!hasContent(cell)) {
+        window.parent.postMessage({ type: 'STED_CELL_BLUR' }, '*');
+        return;
+      }
+      var rect = cell.getBoundingClientRect();
+      var data = getCellData(cell);
+      window.parent.postMessage({
+        type:       'STED_CELL_CLICK',
+        top:        rect.top,
+        left:       rect.left,
+        height:     rect.height,
+        cellCode:   data.cellCode,
+        cellOutput: data.cellOutput,
+      }, '*');
+    });
+  }
+
+  function attachAll() {
+    document.querySelectorAll('.jp-CodeCell, .jp-MarkdownCell').forEach(attach);
+  }
+
+  // Hide bulb when clicking toolbar / outside cells
+  document.addEventListener('mousedown', function(e) {
+    if (!e.target.closest('.jp-CodeCell, .jp-MarkdownCell')) {
+      window.parent.postMessage({ type: 'STED_CELL_BLUR' }, '*');
+    }
+  });
+
+  attachAll();
+
+  var obs = new MutationObserver(function() {
+    document.querySelectorAll(
+      '.jp-CodeCell:not([data-sted-track]), .jp-MarkdownCell:not([data-sted-track])'
+    ).forEach(attach);
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+
+  console.log('[STED Bridge] v5 installed');
 })();
 `;
 
-export default function JupyterNotebook({ setUserCode, onCodeSync }) {
+export default function JupyterNotebook({ setUserCode, onCodeSync, onBulbHint }) {
   const { user, isLoaded, isSignedIn } = useUser();
 
   const [projectKey,   setProjectKey]   = useState(null);
@@ -190,6 +229,9 @@ export default function JupyterNotebook({ setUserCode, onCodeSync }) {
   const [showPreview,  setShowPreview]  = useState(false);
   const [previewCells, setPreviewCells] = useState([]);
   const [syncing,      setSyncing]      = useState(false);
+
+  // Bulb state — rendered in React, positioned over the iframe using fixed coords
+  const [bulbPos, setBulbPos] = useState(null); // { top, left, cellCode, cellOutput }
 
   const iframeRef   = useRef(null);
   const pendingSync = useRef(null);
@@ -249,22 +291,38 @@ export default function JupyterNotebook({ setUserCode, onCodeSync }) {
     function onMessage(event) {
       if (!event.data) return;
 
+      // Cell clicked inside iframe → compute absolute position and show React bulb
+      if (event.data.type === 'STED_CELL_CLICK') {
+        const iframeEl = iframeRef.current;
+        if (!iframeEl) return;
+        const iframeRect = iframeEl.getBoundingClientRect();
+        // rect from iframe is relative to iframe viewport; add iframe's page offset
+        setBulbPos({
+          top:        iframeRect.top  + event.data.top,
+          left:       iframeRect.left + event.data.left,
+          cellCode:   event.data.cellCode,
+          cellOutput: event.data.cellOutput,
+        });
+        return;
+      }
+
+      if (event.data.type === 'STED_CELL_BLUR') {
+        setBulbPos(null);
+        return;
+      }
+
       if (event.data.type === 'STED_NOTEBOOK_DATA') {
         const { notebook, filename, allFiles } = event.data;
-
         if (allFiles?.length > 0) setNotebooks(allFiles);
         if (filename) setActiveNb(filename);
-
         const decoded = decodeRawValue(notebook);
         const code    = codeFromNotebook(decoded);
         const now     = new Date().toISOString();
-
         if (setUserCode) setUserCode(code);
         if (onCodeSync)  onCodeSync({ code, savedAt: now });
         setLastSyncedAt(now);
         setPreviewCells(decoded?.cells || []);
         setSyncing(false);
-
         if (user && projectKey) {
           update(ref(db, `users/${user.id}/pandas/${projectKey}`), {
             notebook:         JSON.stringify(decoded),
@@ -272,7 +330,6 @@ export default function JupyterNotebook({ setUserCode, onCodeSync }) {
             notebookFilename: filename,
           }).catch(console.error);
         }
-
         if (pendingSync.current) { pendingSync.current.resolve(decoded); pendingSync.current = null; }
         showToast(`✓ Synced "${filename}"`, 'success');
       }
@@ -294,7 +351,7 @@ export default function JupyterNotebook({ setUserCode, onCodeSync }) {
     return () => window.removeEventListener('message', onMessage);
   }, [user, projectKey, setUserCode, onCodeSync]);
 
-  // 5. Request notebook from iframe (manual only)
+  // 5. Request notebook (manual)
   const requestNotebook = useCallback((silent = false) => {
     const iframe = iframeRef.current;
     if (!iframe?.contentWindow) return;
@@ -309,12 +366,10 @@ export default function JupyterNotebook({ setUserCode, onCodeSync }) {
     }, 5000);
   }, [activeNb, bridgeReady, injectBridge]);
 
-  // 6. On iframe load: inject bridge after JupyterLite boots
+  // 6. Inject bridge after iframe loads
   const handleIframeLoad = useCallback(() => {
     setIframeReady(true);
-    setTimeout(() => {
-      injectBridge();
-    }, 4000);
+    setTimeout(injectBridge, 1500);
   }, [injectBridge]);
 
   const showToast = (msg, type = 'info') => {
@@ -326,68 +381,16 @@ export default function JupyterNotebook({ setUserCode, onCodeSync }) {
     ? `Synced ${new Date(lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
     : null;
 
+  const handleBulbClick = () => {
+    if (!bulbPos) return;
+    if (onBulbHint) onBulbHint({ cellCode: bulbPos.cellCode, cellOutput: bulbPos.cellOutput });
+    setBulbPos(null);
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#18181b] text-white">
-
-      {/* Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-700 bg-[#1e1e24] shrink-0 gap-2 flex-wrap">
-        <span className="text-purple-300 font-bold text-base tracking-wide flex items-center gap-2">
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-            <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
-          </svg>
-          Jupyter Notebook
-        </span>
-        <div className="flex items-center gap-2 flex-wrap">
-          {syncLabel && !status && (
-            <span className="flex items-center gap-1 text-green-400 text-xs font-medium">
-              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414L8.414 15l-4.121-4.121a1 1 0 011.414-1.414L8.414 12.172l7.879-7.879a1 1 0 011.414 0z" clipRule="evenodd"/>
-              </svg>
-              {syncLabel}
-            </span>
-          )}
-          {status && (
-            <span className={`text-xs font-medium max-w-xs truncate ${statusType === 'error' ? 'text-red-400' : statusType === 'info' ? 'text-blue-300' : 'text-green-400'}`}>
-              {status}
-            </span>
-          )}
-          {notebooks.length > 1 && (
-            <select value={activeNb} onChange={e => setActiveNb(e.target.value)}
-                    className="text-xs bg-gray-800 border border-gray-600 rounded px-2 py-1 text-gray-200">
-              {notebooks.map(nb => <option key={nb} value={nb}>{nb}</option>)}
-            </select>
-          )}
-          {previewCells.length > 0 && (
-            <button onClick={() => setShowPreview(v => !v)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${showPreview ? 'bg-indigo-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}>
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
-              </svg>
-              {showPreview ? 'Hide' : 'Preview'}
-            </button>
-          )}
-          <button onClick={() => requestNotebook(false)} disabled={syncing || !iframeReady}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-700 hover:bg-purple-600 active:bg-purple-800 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-md transition-colors shadow">
-            {syncing ? (
-              <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-              </svg>
-            ) : (
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-              </svg>
-            )}
-            {syncing ? 'Syncing…' : 'Sync Code'}
-          </button>
-        </div>
-      </div>
-
-      {/* Banner */}
       <HowToBanner synced={!!lastSyncedAt} />
 
-      {/* Main */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         <div className={`flex flex-col min-h-0 h-full ${showPreview ? 'w-1/2' : 'w-full'}`}>
           {!iframeReady && (
@@ -399,11 +402,44 @@ export default function JupyterNotebook({ setUserCode, onCodeSync }) {
               <span className="text-sm">Loading JupyterLite…</span>
             </div>
           )}
-          <iframe ref={iframeRef} src={JUPYTERLITE_LAB} title="JupyterLite"
-                  className={`w-full border-0 ${iframeReady ? 'block' : 'hidden'}`}
-                  style={{ height: '100%', flex: 1 }}
-                  onLoad={handleIframeLoad} />
+
+          <iframe
+            ref={iframeRef}
+            src={JUPYTERLITE_LAB}
+            title="JupyterLite"
+            className={`w-full border-0 ${iframeReady ? 'block' : 'hidden'}`}
+            style={{ height: '100%', flex: 1 }}
+            onLoad={handleIframeLoad}
+          />
+
+          {/* 💡 Bulb — React button, position:fixed over the iframe */}
+          {bulbPos && (
+            <button
+              onClick={handleBulbClick}
+              style={{
+                position:   'fixed',
+                top:        bulbPos.top + 8,
+                left:       bulbPos.left + 6,
+                zIndex:     99999,
+                fontSize:   22,
+                lineHeight: 1,
+                background: 'none',
+                border:     'none',
+                cursor:     'pointer',
+                padding:    0,
+                userSelect: 'none',
+                filter:     'drop-shadow(0 0 4px rgba(255,220,0,0.6))',
+                transition: 'transform 0.1s',
+              }}
+              title="Get a hint for this cell"
+              onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.2)'}
+              onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+            >
+              💡
+            </button>
+          )}
         </div>
+
         {showPreview && previewCells.length > 0 && (
           <div className="w-1/2 h-full overflow-y-auto border-l border-gray-700 bg-[#111113] p-3">
             <p className="text-[10px] text-gray-500 mb-3 font-semibold uppercase tracking-widest">Live Code Preview</p>
@@ -427,8 +463,10 @@ function HowToBanner({ synced }) {
         ? <span><b className="text-green-400">✓ Code synced.</b> Click <b>Sync Code</b> again after making changes to update.</span>
         : <span>Write your code in JupyterLite, then click <b>Sync Code</b> in the toolbar to read your code into STED.</span>
       }
-      <button onClick={() => { sessionStorage.setItem('jupyter_banner_v4', '1'); setDismissed(true); }}
-              className="ml-auto text-indigo-400 hover:text-white shrink-0 text-base leading-none">✕</button>
+      <button
+        onClick={() => { sessionStorage.setItem('jupyter_banner_v4', '1'); setDismissed(true); }}
+        className="ml-auto text-indigo-400 hover:text-white shrink-0 text-base leading-none"
+      >✕</button>
     </div>
   );
 }
