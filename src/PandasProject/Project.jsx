@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ref, get } from 'firebase/database';
 import { db } from '../firebase';
 import AI from './AI';
@@ -10,11 +10,17 @@ function Project() {
   const [lastSyncedAt,  setLastSyncedAt] = useState(null);
   const [projectConfig, setProjectConfig] = useState({ title: '', description: '' });
   const [bulbHint,      setBulbHint]     = useState(null); // { cellCode, cellOutput }
+  const [liveMentorEvent, setLiveMentorEvent] = useState(null);
 
-  const handleCodeSync = ({ code, savedAt }) => {
+  const handleCodeSync = useCallback(({ code, savedAt }) => {
     setUserCode(code);
     if (savedAt) setLastSyncedAt(savedAt);
-  };
+  }, []);
+
+  const handleLiveContext = useCallback(({ code, event }) => {
+    setUserCode(code);
+    if (event) setLiveMentorEvent(event);
+  }, []);
 
   // Fetch project data from Firebase
   useEffect(() => {
@@ -61,6 +67,7 @@ function Project() {
             setUserCode={setUserCode}
             onCodeSync={handleCodeSync}
             onBulbHint={setBulbHint}
+            onLiveContext={handleLiveContext}
           />
         </div>
 
@@ -82,6 +89,7 @@ function Project() {
             terminalOutput={[]}
             bulbHint={bulbHint}
             onBulbHintConsumed={() => setBulbHint(null)}
+            liveMentorEvent={liveMentorEvent}
           />
         </div>
       </div>

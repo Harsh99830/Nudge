@@ -65,12 +65,12 @@ function codeFromNotebook(nb) {
     .join('\n\n');
 }
 
-// ── Bridge: only sends cell click info to parent via postMessage ──────
+// ── Bridge: sends cell click info plus lightweight live code/error snapshots.
 // The bulb itself is rendered by React in the parent page — no DOM injection needed.
 // Version stamp busts the guard on each change.
 const BRIDGE_SCRIPT = `
 (function() {
-  var VER = 'v5';
+  var VER = 'v6';
   if (window.__STED_BRIDGE_VER__ === VER) return;
   window.__STED_BRIDGE_VER__ = VER;
 
@@ -158,11 +158,49 @@ const BRIDGE_SCRIPT = `
     var sourceEl = cell.querySelector('.jp-InputArea-editor, .jp-Editor, .CodeMirror');
     var cellCode = sourceEl ? sourceEl.textContent.trim() : '';
     var outputParts = [];
+    var errorParts = [];
     cell.querySelectorAll('.jp-OutputArea-output').forEach(function(out) {
       var txt = out.textContent.trim();
       if (txt) outputParts.push(txt);
+      if (
+        txt &&
+        /(^|\\n)\\s*(traceback|syntaxerror|nameerror|typeerror|valueerror|keyerror|filenotfounderror|parsererror|error:)/i.test(txt)
+      ) {
+        errorParts.push(txt);
+      }
     });
-    return { cellCode: cellCode, cellOutput: outputParts.join('\\n') };
+    return { cellCode: cellCode, cellOutput: outputParts.join('\\n'), cellError: errorParts.join('\\n') };
+  }
+
+  function getNotebookSnapshot() {
+    var cells = Array.from(document.querySelectorAll('.jp-CodeCell')).map(function(cell, index) {
+      var data = getCellData(cell);
+      return {
+        index: index,
+        cellCode: data.cellCode,
+        cellOutput: data.cellOutput,
+        cellError: data.cellError,
+      };
+    }).filter(function(cell) {
+      return cell.cellCode || cell.cellOutput || cell.cellError;
+    });
+    var code = cells.map(function(cell) {
+      var block = cell.cellCode || '';
+      if (cell.cellOutput) block += '\\n# --- Output ---\\n' + cell.cellOutput;
+      return block;
+    }).filter(function(text) {
+      return text.trim();
+    }).join('\\n\\n');
+    var errors = cells.filter(function(cell) {
+      return cell.cellError || /(^|\\n)\\s*(traceback|syntaxerror|nameerror|typeerror|valueerror|keyerror|filenotfounderror|parsererror|error:)/i.test(cell.cellOutput || '');
+    }).map(function(cell) {
+      return {
+        index: cell.index,
+        cellCode: cell.cellCode,
+        cellError: cell.cellError || cell.cellOutput,
+      };
+    });
+    return { code: code, cells: cells, errors: errors };
   }
 
   function hasContent(cell) {
@@ -187,6 +225,7 @@ const BRIDGE_SCRIPT = `
         height:     rect.height,
         cellCode:   data.cellCode,
         cellOutput: data.cellOutput,
+        cellError:  data.cellError,
       }, '*');
     });
   }
@@ -204,18 +243,63 @@ const BRIDGE_SCRIPT = `
 
   attachAll();
 
+  var lastSnapshotKey = '';
+  var lastErrorKey = '';
+  var snapshotTimer = null;
+
+  function scheduleLiveSnapshot(reason) {
+    clearTimeout(snapshotTimer);
+    snapshotTimer = setTimeout(function() {
+      var snapshot = getNotebookSnapshot();
+      var snapshotKey = JSON.stringify({
+        code: snapshot.code,
+        errors: snapshot.errors.map(function(err) {
+          return { index: err.index, cellError: err.cellError };
+        }),
+      });
+      if (snapshotKey === lastSnapshotKey) return;
+      lastSnapshotKey = snapshotKey;
+      window.parent.postMessage({
+        type: 'STED_LIVE_CONTEXT',
+        reason: reason || 'mutation',
+        code: snapshot.code,
+        cells: snapshot.cells,
+        errors: snapshot.errors,
+      }, '*');
+
+      if (snapshot.errors.length > 0) {
+        var latest = snapshot.errors[snapshot.errors.length - 1];
+        var errorKey = latest.index + ':' + latest.cellError;
+        if (errorKey !== lastErrorKey) {
+          lastErrorKey = errorKey;
+          window.parent.postMessage({
+            type: 'STED_CELL_ERROR',
+            cellIndex: latest.index,
+            cellCode: latest.cellCode,
+            cellError: latest.cellError,
+            code: snapshot.code,
+          }, '*');
+        }
+      } else {
+        lastErrorKey = '';
+      }
+    }, 900);
+  }
+
   var obs = new MutationObserver(function() {
     document.querySelectorAll(
       '.jp-CodeCell:not([data-sted-track]), .jp-MarkdownCell:not([data-sted-track])'
     ).forEach(attach);
+    scheduleLiveSnapshot('mutation');
   });
-  obs.observe(document.body, { childList: true, subtree: true });
+  obs.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+  scheduleLiveSnapshot('bridge-ready');
 
-  console.log('[STED Bridge] v5 installed');
+  console.log('[STED Bridge] v6 installed');
 })();
 `;
 
-export default function JupyterNotebook({ setUserCode, onCodeSync, onBulbHint }) {
+export default function JupyterNotebook({ setUserCode, onCodeSync, onBulbHint, onLiveContext }) {
   const { user, isLoaded, isSignedIn } = useUser();
 
   const [projectKey,   setProjectKey]   = useState(null);
@@ -302,6 +386,7 @@ export default function JupyterNotebook({ setUserCode, onCodeSync, onBulbHint })
           left:       iframeRect.left + event.data.left,
           cellCode:   event.data.cellCode,
           cellOutput: event.data.cellOutput,
+          cellError:  event.data.cellError,
         });
         return;
       }
@@ -345,11 +430,40 @@ export default function JupyterNotebook({ setUserCode, onCodeSync, onBulbHint })
           showToast(`Could not read notebook: ${msg}`, 'error');
         }
       }
+
+      if (event.data.type === 'STED_LIVE_CONTEXT') {
+        const code = event.data.code || '';
+        if (setUserCode) setUserCode(code);
+        if (onLiveContext) onLiveContext({
+          code,
+          cells: event.data.cells || [],
+          errors: event.data.errors || [],
+          reason: event.data.reason,
+        });
+        return;
+      }
+
+      if (event.data.type === 'STED_CELL_ERROR') {
+        const code = event.data.code || '';
+        if (setUserCode) setUserCode(code);
+        if (onLiveContext) onLiveContext({
+          code,
+          event: {
+            id: `${event.data.cellIndex}-${Date.now()}`,
+            type: 'cell-error',
+            cellIndex: event.data.cellIndex,
+            cellCode: event.data.cellCode || '',
+            cellError: event.data.cellError || '',
+            occurredAt: new Date().toISOString(),
+          },
+        });
+        return;
+      }
     }
 
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [user, projectKey, setUserCode, onCodeSync]);
+  }, [user, projectKey, setUserCode, onCodeSync, onLiveContext]);
 
   // 5. Request notebook (manual)
   const requestNotebook = useCallback((silent = false) => {
@@ -383,7 +497,7 @@ export default function JupyterNotebook({ setUserCode, onCodeSync, onBulbHint })
 
   const handleBulbClick = () => {
     if (!bulbPos) return;
-    if (onBulbHint) onBulbHint({ cellCode: bulbPos.cellCode, cellOutput: bulbPos.cellOutput });
+    if (onBulbHint) onBulbHint({ cellCode: bulbPos.cellCode, cellOutput: bulbPos.cellOutput, cellError: bulbPos.cellError });
     setBulbPos(null);
   };
 
