@@ -21,7 +21,7 @@ function SendIcon() {
   );
 }
 
-function AI({ userCode, messages, setMessages, terminalOutput = [], bulbHint, onBulbHintConsumed, liveMentorEvent }) {
+function AI({ userCode, messages, setMessages, terminalOutput = [], bulbHint, onBulbHintConsumed, liveMentorEvent, projectConfig }) {
   const [hintText,       setHintText]       = useState('');   // what shows in the hint box
   const [hintLoading,    setHintLoading]     = useState(false);
   const [hintSource,     setHintSource]      = useState(null); // 'bulb' | 'ask'
@@ -102,28 +102,67 @@ function AI({ userCode, messages, setMessages, terminalOutput = [], bulbHint, on
     callAI(buildLiveErrorPrompt(liveMentorEvent));
   }, [liveMentorEvent]);
 
-  // ── Helpers ──────────────────────────────────────────────────────────
-  function buildBulbPrompt(hint, level) {
-    return `You are a friendly data-science tutor. A student is stuck on a cell.
+  // Derives a structured progress analysis from data profile + student code.
+  // This is injected into every prompt so AI always reasons from what's done vs what's needed.
+  function buildProgressBlock() {
+    const profile  = projectConfig?.dataProfile;
+    const sample   = projectConfig?.dataSample;
+    const desc     = projectConfig?.description || '';
+    const code     = userCode || '';
 
-Full notebook code:
+    const profileStr = profile ? compactJson(profile, 2000) : null;
+    const sampleStr  = sample  ? compactJson(sample,  1000) : null;
+
+    return `
+## DATA PROFILE
+${ profileStr
+  ? `The dataset has the following profile (columns, dtypes, nulls, stats):
+\`\`\`json
+${profileStr}
+\`\`\`
+${ sampleStr ? `Sample rows:
+\`\`\`json
+${sampleStr}
+\`\`\`` : '' }`
+  : '(No data profile available yet.)'
+}
+
+## PROJECT GOAL
+${ desc || '(No project description provided.)' }
+
+## STUDENT CODE SO FAR
 \`\`\`python
-${userCode || '# (no code synced yet)'}
+${ compactText(code) || '# (no code written yet)' }
 \`\`\`
 
-The cell they clicked:
+## YOUR INTERNAL REASONING (never show this to the student)
+Before responding, silently reason through these three questions:
+1. REQUIREMENTS — Based on the data profile and project goal, what are all the analysis steps this project needs? (e.g. load data, inspect shape/dtypes, handle nulls, rename columns, filter rows, compute aggregations, plot, etc.)
+2. FULFILLED — Which of those steps has the student already completed in their code? Be generous: if they wrote something partially correct, count it.
+3. GAP — What is the single most important next step the student has NOT done yet, given what they have written so far?
+
+Your hint or reply must be grounded in this gap analysis — not generic pandas advice.`;
+  }
+
+  function buildBulbPrompt(hint, level) {
+    return `You are a friendly data-science tutor. A student clicked the hint bulb on a specific cell.
+${buildProgressBlock()}
+
+## CLICKED CELL
 \`\`\`python
 ${hint.cellCode || '(empty cell)'}
 \`\`\`
-${hint.cellError || hint.cellOutput ? `\nOutput / error:\n${hint.cellError || hint.cellOutput}` : ''}
+${hint.cellError || hint.cellOutput ? `\nCell output / error:\n${compactText(hint.cellError || hint.cellOutput, 800)}` : ''}
 
-Hint level ${level}/3:
-- 1: One gentle nudge sentence, do NOT name the problem.
-- 2: 1–2 sentences pointing to the general area.
-- 3: 2 sentences, very close to the answer but no exact code.
+## TASK
+Using your gap analysis above, give a hint about THIS cell at level ${level}/3:
+- Level 1: One sentence MAX. A gentle nudge. No method names, no problem name.
+- Level 2: One sentence. Name the concept area only.
+- Level 3: One sentence, very close to the answer — still no exact code.
 
-Rules: never give the solution or full code. If code is correct say "This looks correct! What's your next step?"
-Be warm and beginner-friendly.`;
+CRITICAL: ONE sentence only. No recap of what they've done, no encouragement preamble.
+If the cell is correct, say: "Looks good — think about what the data still needs next."
+Never write corrected code.`;
   }
 
   function compactText(text, maxChars = 4500) {
@@ -132,6 +171,33 @@ Be warm and beginner-friendly.`;
     const head = text.slice(0, Math.floor(maxChars * 0.65));
     const tail = text.slice(-Math.floor(maxChars * 0.25));
     return `${head}\n\n# ... earlier notebook context trimmed ...\n\n${tail}`;
+  }
+
+  function compactJson(value, maxChars = 3500) {
+    if (!value) return '';
+    try {
+      return compactText(JSON.stringify(value, null, 2), maxChars);
+    } catch (_) {
+      return compactText(String(value), maxChars);
+    }
+  }
+
+  function buildProjectContext(maxChars = 3500) {
+    const context = {
+      title: projectConfig?.title || 'Pandas Project',
+      description: projectConfig?.description || '',
+      dataLink: projectConfig?.dataLink || '',
+      dataProfile: projectConfig?.dataProfile || null,
+      dataSample: projectConfig?.dataSample || null,
+    };
+    return compactJson(context, maxChars);
+  }
+
+  function projectContextPrompt(maxChars) {
+    const context = buildProjectContext(maxChars);
+    return context
+      ? `\nProject and dataset context:\n\`\`\`json\n${context}\n\`\`\`\nUse this dataset profile to reason like a real mentor, but do not reveal hidden insights too early. Use it to judge whether the student's next step is sensible.`
+      : '';
   }
 
   function buildLiveErrorPrompt(event) {
@@ -143,6 +209,7 @@ Full notebook context:
 \`\`\`python
 ${compactText(userCode || '# (no live code yet)')}
 \`\`\`
+${projectContextPrompt(2600)}
 
 Cell with the error:
 \`\`\`python
@@ -159,40 +226,42 @@ Ask the student to read the error and tell you what they think caused it.`;
 
   function buildAskPrompt(question, level = 1) {
     const recentErrorContext = liveMentorEvent?.type === 'cell-error'
-      ? `\nMost recent error cell:\n\`\`\`python\n${liveMentorEvent.cellCode || '(empty cell)'}\n\`\`\`\n\nMost recent error output:\n${compactText(liveMentorEvent.cellError || '', 1800)}`
+      ? `\n## RECENT ERROR\nCell:\n\`\`\`python\n${liveMentorEvent.cellCode || '(empty cell)'}\n\`\`\`\nError:\n${compactText(liveMentorEvent.cellError || '', 800)}`
       : '';
-    const isNextStepQuestion = /what'?s my next step|what is my next step|next step/i.test(question);
-    const recentAskHistory = askHistory.slice(-4)
-      .map(turn => `${turn.role === 'student' ? 'Student' : 'Mentor'}: ${turn.content}`)
-      .join('\n');
-    const previousMentorAskedQuestion = askHistory.slice().reverse()
-      .some(turn => turn.role === 'mentor' && /\?\s*$/.test(turn.content || ''));
+    const isNextStep = /what'?s my next step|what is my next step|next step/i.test(question);
+    const recentHistory = askHistory.slice(-4)
+      .map(t => `${t.role === 'student' ? 'Student' : 'Mentor'}: ${t.content}`).join('\n');
+    const prevMentorQn = askHistory.slice().reverse()
+      .some(t => t.role === 'mentor' && /\?\s*$/.test(t.content || ''));
 
     return `You are a helpful data-science tutor. The student is working on a pandas project.
-Give hints and guidance only. Keep answers concise and warm.
-${hintText ? `\nRecent hint shown to student: "${hintText}"` : ''}
-${recentAskHistory ? `\nRecent Ask conversation:\n${recentAskHistory}` : ''}
-${userCode ? `\nNotebook code:\n\`\`\`python\n${compactText(userCode)}\n\`\`\`` : ''}
+Give hints and guidance only — no full solutions or complete code.
+${buildProgressBlock()}
 ${recentErrorContext}
-${isNextStepQuestion ? `\nThe student is asking for the next step. Do NOT tell them the next step directly. Vary the response naturally: either ask one short reflective question, or briefly recap what they just did and name the current broad problem, then ask what they think they should do next. Do not mention exact methods, column names, syntax, or code unless the student already named them.` : ''}
-${previousMentorAskedQuestion && !isNextStepQuestion ? `\nThe student appears to be answering your previous reflective question. Treat this as a continuation, not a new standalone request. Judge their proposed next step using the notebook/output. If their step is reasonable, say only that it is a good next move and tell them to continue. If it is not reasonable, gently say what broad idea to reconsider. Do NOT add extra tasks, examples, column names, method names, syntax, or code unless the student explicitly asked for them or already named those exact columns/methods. Do NOT ask another open-ended question unless their idea is too vague to evaluate. Keep this response to one short sentence.` : ''}
+${recentHistory ? `\n## CONVERSATION SO FAR\n${recentHistory}` : ''}
+${isNextStep
+  ? `\n## NEXT STEP QUESTION\nDo NOT tell them the next step directly. Instead: briefly name what they\'ve accomplished so far based on their code and the data profile, then ask what they think should come next. Do not mention exact methods, column names, or code unless the student already named them.`
+  : ''
+}
+${prevMentorQn && !isNextStep
+  ? `\n## CONTINUATION\nThe student is replying to your previous question. Judge their proposed next step against the gap analysis. If reasonable, confirm briefly and tell them to continue. If not, gently name what to reconsider. One sentence only. No extra tasks, no column names, no code unless the student named them.`
+  : ''
+}
 
 Help level ${level}/4:
-- 1: One sentence only. Give the concept or direction. Do NOT include code, exact syntax, or a full method call.
-- 2: One or two sentences. You may name the relevant pandas method or parameter, but do NOT write the exact code line.
-- 3: Give a partial code shape with blanks/placeholders, not the completed answer.
-- 4: If the student has clearly tried multiple times, you may give the exact minimal syntax.
+- 1: One sentence MAX. Concept only. No code, no method names.
+- 2: One sentence. May hint at the method area, nothing more.
+- 3: One sentence with a partial clue. Still no exact code.
+- 4: Exact minimal syntax only if student has clearly tried multiple times.
 
-When the student asks about an error, inspect the code that produced it before giving advice.
-Do not give generic debugging advice if the code reveals a specific likely cause.
-For pandas errors, pay close attention to method defaults and parameters like axis, columns, index, inplace, sep, header, and encoding.
-If a DataFrame method is being used with a column name but the method defaults to rows, guide them toward the relevant parameter instead of telling them only to inspect df.columns.
-If the student asks "how can I..." for a normal concept, do not jump to a full answer at level 1.
+CRITICAL: Every response must be ONE sentence only (levels 1-3). No explanations, no "what they've done so far" recap, no encouragement padding. Just the one sentence hint.
 
 Student asks: ${question}`;
   }
 
   function callAI(prompt, onText) {
+    console.log('%c[NUDGE AI] ▶ Sending to OpenAI', 'color:#14b8a6;font-weight:bold');
+    console.log(prompt);
     fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -203,12 +272,14 @@ Student asks: ${question}`;
         model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.5,
-        max_tokens: 180,
+        max_tokens: 60,
       }),
     })
       .then(r => r.json())
       .then(d => {
         const text = d.choices?.[0]?.message?.content || 'Could not generate a response.';
+        console.log('%c[NUDGE AI] ◀ Response received', 'color:#0ea5e9;font-weight:bold');
+        console.log(text);
         setHintText(text);
         if (onText) onText(text);
       })
@@ -242,6 +313,8 @@ Student asks: ${question}`;
   const progressDots = 4;
   const filledDots   = Math.min(Math.ceil(elapsedMin / 15), progressDots);
   const hasContent   = hintLoading || !!hintText;
+  const projectTitle = projectConfig?.title || 'Pandas Project';
+  const projectDescription = projectConfig?.description || 'Learn pandas by working with real datasets';
 
   return (
     <div className="flex flex-col h-full" style={{ background: '#070b0d', color: '#cbd5e1' }}>
@@ -266,9 +339,9 @@ Student asks: ${question}`;
         <div className="card px-4 py-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs font-bold text-white">Pandas Data Analysis</p>
+              <p className="text-xs font-bold text-white">{projectTitle}</p>
               <p className="text-[11px] mt-0.5" style={{ color: 'rgba(203,213,225,.4)' }}>
-                Build data analysis skills with real datasets
+                {projectDescription}
               </p>
             </div>
             <span className="text-xs font-mono" style={{ color: '#14b8a6' }}>{elapsedMin} min</span>

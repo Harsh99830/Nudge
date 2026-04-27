@@ -1,0 +1,311 @@
+{
+  "source_file": "/Users/harshagrawal/Downloads/train.csv",
+  "profiled_at": "2026-04-27",
+  "overview": {
+    "rows": 9800,
+    "columns": 18,
+    "memory_mb": 8.823,
+    "duplicate_rows": 0
+  },
+  "columns": [
+    "Row ID",
+    "Order ID",
+    "Order Date",
+    "Ship Date",
+    "Ship Mode",
+    "Customer ID",
+    "Customer Name",
+    "Segment",
+    "Country",
+    "City",
+    "State",
+    "Postal Code",
+    "Region",
+    "Product ID",
+    "Category",
+    "Sub-Category",
+    "Product Name",
+    "Sales"
+  ],
+  "dtypes": {
+    "Row ID": "int64",
+    "Order ID": "object",
+    "Order Date": "object",
+    "Ship Date": "object",
+    "Ship Mode": "object",
+    "Customer ID": "object",
+    "Customer Name": "object",
+    "Segment": "object",
+    "Country": "object",
+    "City": "object",
+    "State": "object",
+    "Postal Code": "float64",
+    "Region": "object",
+    "Product ID": "object",
+    "Category": "object",
+    "Sub-Category": "object",
+    "Product Name": "object",
+    "Sales": "float64"
+  },
+  "recommended_type_fixes": {
+    "Order Date": "datetime",
+    "Ship Date": "datetime",
+    "Postal Code": "string_or_category",
+    "Row ID": "identifier",
+    "Sales": "numeric"
+  },
+  "missing_values": [
+    {
+      "column": "Postal Code",
+      "missing": 11,
+      "percent": 0.112
+    }
+  ],
+  "missing_value_locations": {
+    "Postal Code": [
+      {
+        "City": "Burlington",
+        "State": "Vermont",
+        "Region": "East",
+        "rows": 11
+      }
+    ]
+  },
+  "unique_counts": {
+    "Row ID": 9800,
+    "Order ID": 4922,
+    "Order Date": 1230,
+    "Ship Date": 1326,
+    "Ship Mode": 4,
+    "Customer ID": 793,
+    "Customer Name": 793,
+    "Segment": 3,
+    "Country": 1,
+    "City": 529,
+    "State": 49,
+    "Postal Code": 626,
+    "Region": 4,
+    "Product ID": 1861,
+    "Category": 3,
+    "Sub-Category": 17,
+    "Product Name": 1849,
+    "Sales": 5757
+  },
+  "id_checks": {
+    "Row ID": {
+      "unique": 9800,
+      "missing": 0,
+      "is_unique": true
+    },
+    "Postal Code": {
+      "unique": 626,
+      "missing": 11,
+      "is_unique": false
+    }
+  },
+  "date_profile": {
+    "Order Date": {
+      "parse_failures": 0,
+      "min": "2015-01-03",
+      "max": "2018-12-30"
+    },
+    "Ship Date": {
+      "parse_failures": 0,
+      "min": "2015-01-07",
+      "max": "2019-01-05"
+    },
+    "ship_delay_days": {
+      "min": 0,
+      "max": 7,
+      "mean": 3.96,
+      "negative_count": 0,
+      "missing": 0
+    }
+  },
+  "numeric_summary": {
+    "Row ID": {
+      "count": 9800,
+      "mean": 4900.5,
+      "std": 2829.161,
+      "min": 1,
+      "q25": 2450.75,
+      "median": 4900.5,
+      "q75": 7350.25,
+      "max": 9800
+    },
+    "Postal Code": {
+      "count": 9789,
+      "mean": 55273.322,
+      "std": 32041.223,
+      "min": 1040,
+      "q25": 23223,
+      "median": 58103,
+      "q75": 90008,
+      "max": 99301
+    },
+    "Sales": {
+      "count": 9800,
+      "mean": 230.769,
+      "std": 626.652,
+      "min": 0.444,
+      "q25": 17.248,
+      "median": 54.49,
+      "q75": 210.605,
+      "max": 22638.48
+    }
+  },
+  "categorical_top_values": {
+    "Ship Mode": [
+      { "value": "Standard Class", "count": 5859 },
+      { "value": "Second Class", "count": 1902 },
+      { "value": "First Class", "count": 1501 },
+      { "value": "Same Day", "count": 538 }
+    ],
+    "Segment": [
+      { "value": "Consumer", "count": 5101 },
+      { "value": "Corporate", "count": 2953 },
+      { "value": "Home Office", "count": 1746 }
+    ],
+    "Country": [
+      { "value": "United States", "count": 9800 }
+    ],
+    "Region": [
+      { "value": "West", "count": 3140 },
+      { "value": "East", "count": 2785 },
+      { "value": "Central", "count": 2277 },
+      { "value": "South", "count": 1598 }
+    ],
+    "Category": [
+      { "value": "Office Supplies", "count": 5909 },
+      { "value": "Furniture", "count": 2078 },
+      { "value": "Technology", "count": 1813 }
+    ],
+    "Sub-Category": [
+      { "value": "Binders", "count": 1492 },
+      { "value": "Paper", "count": 1338 },
+      { "value": "Furnishings", "count": 931 },
+      { "value": "Phones", "count": 876 },
+      { "value": "Storage", "count": 832 }
+    ],
+    "City": [
+      { "value": "New York City", "count": 891 },
+      { "value": "Los Angeles", "count": 728 },
+      { "value": "Philadelphia", "count": 532 },
+      { "value": "San Francisco", "count": 500 },
+      { "value": "Seattle", "count": 426 }
+    ],
+    "State": [
+      { "value": "California", "count": 1946 },
+      { "value": "New York", "count": 1097 },
+      { "value": "Texas", "count": 973 },
+      { "value": "Pennsylvania", "count": 582 },
+      { "value": "Washington", "count": 504 }
+    ]
+  },
+  "sales_profile": {
+    "zero_or_negative_sales": 0,
+    "by_category": [
+      {
+        "Category": "Technology",
+        "count": 1813,
+        "total_sales": 827455.87,
+        "avg_sales": 456.4
+      },
+      {
+        "Category": "Furniture",
+        "count": 2078,
+        "total_sales": 728658.58,
+        "avg_sales": 350.65
+      },
+      {
+        "Category": "Office Supplies",
+        "count": 5909,
+        "total_sales": 705422.33,
+        "avg_sales": 119.38
+      }
+    ],
+    "by_region": [
+      {
+        "Region": "West",
+        "count": 3140,
+        "total_sales": 710219.68,
+        "avg_sales": 226.18
+      },
+      {
+        "Region": "East",
+        "count": 2785,
+        "total_sales": 669518.73,
+        "avg_sales": 240.4
+      },
+      {
+        "Region": "Central",
+        "count": 2277,
+        "total_sales": 492646.91,
+        "avg_sales": 216.36
+      },
+      {
+        "Region": "South",
+        "count": 1598,
+        "total_sales": 389151.46,
+        "avg_sales": 243.52
+      }
+    ],
+    "by_segment": [
+      {
+        "Segment": "Consumer",
+        "count": 5101,
+        "total_sales": 1148060.53,
+        "avg_sales": 225.07
+      },
+      {
+        "Segment": "Corporate",
+        "count": 2953,
+        "total_sales": 688494.07,
+        "avg_sales": 233.15
+      },
+      {
+        "Segment": "Home Office",
+        "count": 1746,
+        "total_sales": 424982.18,
+        "avg_sales": 243.4
+      }
+    ],
+    "by_year": [
+      {
+        "year": 2015,
+        "count": 1953,
+        "total_sales": 479856.21,
+        "avg_sales": 245.7
+      },
+      {
+        "year": 2016,
+        "count": 2055,
+        "total_sales": 459436.01,
+        "avg_sales": 223.57
+      },
+      {
+        "year": 2017,
+        "count": 2534,
+        "total_sales": 600192.55,
+        "avg_sales": 236.86
+      },
+      {
+        "year": 2018,
+        "count": 3258,
+        "total_sales": 722052.02,
+        "avg_sales": 221.62
+      }
+    ]
+  },
+  "mentor_insights": [
+    "Postal Code has 11 missing values, all from Burlington, Vermont.",
+    "Order Date and Ship Date are stored as strings and should be converted to datetime for time-based analysis.",
+    "Postal Code is stored as float because of missing values, but it should be treated as a string or category.",
+    "Row ID is unique and should be treated as an identifier, not as a meaningful numeric feature.",
+    "Country has only one value, United States, so it is unlikely to be useful for comparison.",
+    "Sales is highly skewed: the median is 54.49 but the maximum is 22638.48.",
+    "Technology has the highest total sales and highest average sales among categories.",
+    "West has the highest total sales by region.",
+    "There are no duplicate rows and no zero or negative Sales values."
+  ]
+}

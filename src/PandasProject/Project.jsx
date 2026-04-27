@@ -4,6 +4,29 @@ import { db } from '../firebase';
 import AI from './AI';
 import JupyterNotebook from './JupyterNotebook';
 
+const META_KEYS = new Set(['id', 'title', 'description']);
+
+function pickFirst(...values) {
+  return values.find(value => value !== undefined && value !== null && value !== '');
+}
+
+function extractProfilePayload(profile = {}) {
+  const nestedProfile = pickFirst(
+    profile.dataProfile,
+    profile.datasetProfile,
+    profile.profile,
+    profile.profileData,
+    profile.analysis,
+    profile.summary
+  );
+  if (nestedProfile) return nestedProfile;
+
+  const profileOnlyData = Object.fromEntries(
+    Object.entries(profile).filter(([key]) => !META_KEYS.has(key))
+  );
+  return Object.keys(profileOnlyData).length ? profileOnlyData : null;
+}
+
 function Project() {
   const [chatMessages,  setChatMessages]  = useState([]);
   const [userCode,      setUserCode]     = useState('');
@@ -26,13 +49,35 @@ function Project() {
   useEffect(() => {
     const fetchProjectData = async () => {
       try {
-        const projectRef = ref(db, 'PandasProject/Project3');
+        const params = new URLSearchParams(window.location.search);
+        const projectId = params.get('id') || 'Project3';
+        const projectRef = ref(db, `PandasProject/${projectId}`);
         const snap = await get(projectRef);
         if (snap.exists()) {
           const data = snap.val();
+          const profile = data.Profile || data.profile || {};
+          const dataProfile = pickFirst(
+            extractProfilePayload(profile),
+            data.DataProfile,
+            data.dataProfile,
+            data.datasetProfile,
+            data.profileData,
+            data.ProfileData
+          );
+          const dataSample = pickFirst(
+            data.DataSample,
+            data.dataSample,
+            data.SampleData,
+            data.sampleData,
+            data.Data,
+            data.data
+          );
           setProjectConfig({
-            title: data.title || 'Pandas Project',
-            description: data.description || 'Learn pandas by working with real datasets',
+            title: profile.title || data.title || 'Pandas Project',
+            description: profile.description || data.description || 'Learn pandas by working with real datasets',
+            dataLink: data.DataLink || data.dataLink || profile.DataLink || profile.dataLink || '',
+            dataProfile,
+            dataSample,
           });
         }
       } catch (error) {
@@ -90,6 +135,7 @@ function Project() {
             bulbHint={bulbHint}
             onBulbHintConsumed={() => setBulbHint(null)}
             liveMentorEvent={liveMentorEvent}
+            projectConfig={projectConfig}
           />
         </div>
       </div>
